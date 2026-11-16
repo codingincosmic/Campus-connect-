@@ -35,7 +35,9 @@ async function request(path, { method = 'GET', body, formData, signal } = {}) {
   let response;
 
   try {
-    response = await fetch(`/api${path}`, {
+    const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
+
+response = await fetch(`${API_BASE_URL}${path}`, {
       method,
       credentials: 'include',
       /**
