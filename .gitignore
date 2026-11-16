@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+
+# Environment files - never commit real secrets.
+# The bare `.env*` catch-all is deliberate: it covers backups and ad-hoc copies
+# like `.env.backup` or `.env.old`, which is exactly how credentials leak.
+.env*
+!.env.example
+
+# Uploaded files (assignment attachments etc.)
+server/uploads/*
+!server/uploads/.gitkeep
+
+# Logs / editor / OS noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

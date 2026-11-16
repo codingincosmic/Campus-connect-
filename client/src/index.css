@@ -1,0 +1,36 @@
+/**
+ * Tailwind CSS v4 uses a CSS-first configuration: design tokens are declared
+ * here in @theme rather than in a tailwind.config.js file.
+ */
+@import 'tailwindcss';
+
+@theme {
+  /* Brand colour ramp, used for buttons, links and the app bar. */
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-200: #c7d2fe;
+  --color-brand-300: #a5b4fc;
+  --color-brand-400: #818cf8;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-700: #4338ca;
+  --color-brand-800: #3730a3;
+  --color-brand-900: #312e81;
+}
+
+/* --------------------------------------------------------------------------
+   Small global defaults
+   -------------------------------------------------------------------------- */
+html {
+  /* Stop iOS Safari inflating text in landscape. */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  @apply bg-slate-100 text-slate-900 antialiased;
+}
+
+/* Keyboard focus should always be clearly visible for accessibility. */
+:focus-visible {
+  @apply outline-2 outline-offset-2 outline-brand-600;
+}

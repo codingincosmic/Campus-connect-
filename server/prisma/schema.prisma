@@ -1,0 +1,347 @@
+// ---------------------------------------------------------------------------
+// Prisma schema for the Campus Connect 
+//
+// This file is the single source of truth for the database. After editing it,
+// run:  npm run db:migrate    (creates + applies a migration)
+//
+// The whole schema for every phase is defined here up front so that later
+// features don't require re-shaping tables you already have data in.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Four distinct roles. ADMIN manages the college; TEACHER only touches
+/// the subjects they are assigned to; STUDENT and PARENT are read-mostly.
+enum Role {
+  ADMIN
+  TEACHER
+  STUDENT
+  PARENT
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+/// ALL     -> every user in the college
+/// CLASS   -> every section of a class name+year (e.g. all of "BCA Year 2")
+/// SECTION -> one specific class+section row (e.g. "BCA Year 2 / A")
+enum NoticeTargetType {
+  ALL
+  CLASS
+  SECTION
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String  @id @default(cuid())
+  name         String
+  email        String  @unique
+  /// Optional login alias, so students can sign in with a roll number style
+  /// username instead of an email address.
+  username     String? @unique
+  passwordHash String
+  role         Role
+
+  /// Students only. Kept on User (rather than a separate table) to match the
+  /// simple `users` shape in the spec.
+  rollNo String? @unique
+  phone  String?
+
+  isActive Boolean @default(true)
+  /// Set to true when an admin resets a password, forcing a change on next login.
+  mustChangePassword Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // --- who created this account (admins create student/parent accounts) ---
+  createdById  String?
+  createdBy    User?   @relation("UserCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers User[]  @relation("UserCreator")
+
+  // --- role-specific relations ---
+  taughtSubjects Subject[]           @relation("SubjectTeacher")
+  enrollments    Enrollment[]        @relation("StudentEnrollments")
+  parentLinks    ParentStudentLink[] @relation("ParentSide")
+  childLinks     ParentStudentLink[] @relation("StudentSide")
+
+  attendance       AttendanceRecord[] @relation("AttendanceStudent")
+  attendanceMarked AttendanceRecord[] @relation("AttendanceMarkedBy")
+
+  assignmentsCreated Assignment[] @relation("AssignmentCreator")
+  submissions        Submission[] @relation("SubmissionStudent")
+  submissionsGraded  Submission[] @relation("SubmissionGrader")
+
+  noticesPosted Notice[]     @relation("NoticeAuthor")
+  noticeReads   NoticeRead[]
+
+  @@index([role])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Academic structure
+// ---------------------------------------------------------------------------
+
+/// One row = one class AND section pair, for one academic year + semester.
+/// e.g. name "BCA Year 2", section "A", academicYear "2025-26", semester 3
+model Class {
+  id           String @id @default(cuid())
+  name         String
+  section      String
+  academicYear String
+  semester     Int    @default(1)
+
+  createdAt DateTime @default(now())
+
+  subjects    Subject[]
+  enrollments Enrollment[]
+  notices     Notice[]
+
+  @@unique([name, section, academicYear])
+  @@map("classes")
+}
+
+model Subject {
+  id   String  @id @default(cuid())
+  name String
+  code String?
+
+  /// Credit hours, used to weight the SGPA/CGPA calculation.
+  credits Int @default(3)
+
+  classId   String
+  teacherId String?
+
+  class   Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacher User? @relation("SubjectTeacher", fields: [teacherId], references: [id], onDelete: SetNull)
+
+  attendance  AttendanceRecord[]
+  assignments Assignment[]
+
+  @@unique([classId, name])
+  @@index([teacherId])
+  @@map("subjects")
+}
+
+/// Which students sit in which class+section.
+model Enrollment {
+  id        String   @id @default(cuid())
+  studentId String
+  classId   String
+  createdAt DateTime @default(now())
+
+  student User  @relation("StudentEnrollments", fields: [studentId], references: [id], onDelete: Cascade)
+  class   Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, classId])
+  /// Postgres composite indexes only serve queries on a LEFTMOST prefix, so the
+  /// unique above covers lookups by studentId but not by classId alone. Class
+  /// rosters, gradebooks and dashboards all filter by classId, so it needs its
+  /// own index — without it those become sequential scans as enrolment grows.
+  @@index([classId])
+  @@map("student_class_enrollments")
+}
+
+/// A parent may be linked to several students, and a student may have
+/// several linked parents/guardians.
+model ParentStudentLink {
+  id        String @id @default(cuid())
+  parentId  String
+  studentId String
+
+  /// "Father", "Mother", "Guardian", ...
+  relationship String?
+
+  createdAt DateTime @default(now())
+
+  parent  User @relation("ParentSide", fields: [parentId], references: [id], onDelete: Cascade)
+  student User @relation("StudentSide", fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([parentId, studentId])
+  /// Reverse lookup: "who are this student's parents?"
+  @@index([studentId])
+  @@map("parent_student_links")
+}
+
+// ---------------------------------------------------------------------------
+// Attendance
+// ---------------------------------------------------------------------------
+
+model AttendanceRecord {
+  id        String   @id @default(cuid())
+  studentId String
+  subjectId String
+  /// Calendar date only (no time component).
+  date      DateTime @db.Date
+  /// Period number within the day. Defaults to 1 for schools that only mark
+  /// one attendance per subject per day.
+  periodNo  Int      @default(1)
+  status    AttendanceStatus
+
+  markedById String
+  createdAt  DateTime @default(now())
+
+  /// Set when a teacher edits an existing record inside the 7-day window.
+  editedAt   DateTime?
+  editReason String?
+
+  student  User    @relation("AttendanceStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  subject  Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  markedBy User    @relation("AttendanceMarkedBy", fields: [markedById], references: [id])
+
+  /// One record per student, per subject, per date, per period.
+  @@unique([studentId, subjectId, date, periodNo])
+  @@index([subjectId, date])
+  @@index([studentId])
+  /// Admin oversight groups attendance by the teacher who marked it.
+  @@index([markedById])
+  @@map("attendance_records")
+}
+
+// ---------------------------------------------------------------------------
+// Assignments
+// ---------------------------------------------------------------------------
+
+model Assignment {
+  id          String   @id @default(cuid())
+  subjectId   String
+  title       String
+  description String?
+  dueDate     DateTime
+  /// Storage key returned by the storage adapter, not a raw filesystem path.
+  fileUrl     String?
+  fileName    String?
+  maxMarks    Int      @default(100)
+  createdById String
+  createdAt   DateTime @default(now())
+
+  subject     Subject      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  createdBy   User         @relation("AssignmentCreator", fields: [createdById], references: [id])
+  submissions Submission[]
+
+  @@index([subjectId])
+  @@index([dueDate])
+  /// Oversight groups assignments by the teacher who created them.
+  @@index([createdById])
+  @@map("assignments")
+}
+
+model Submission {
+  id           String  @id @default(cuid())
+  assignmentId String
+  studentId    String
+  fileUrl      String?
+  fileName     String?
+
+  submittedAt DateTime @default(now())
+  /// Computed on submit: submittedAt > assignment.dueDate
+  isLate      Boolean  @default(false)
+
+  marksObtained Float?
+  feedback      String?
+  gradedAt      DateTime?
+  gradedById    String?
+
+  /// Marks stay hidden from student/parent until the teacher publishes them.
+  isPublished Boolean @default(false)
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  student    User       @relation("SubmissionStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  gradedBy   User?      @relation("SubmissionGrader", fields: [gradedById], references: [id], onDelete: SetNull)
+
+  @@unique([assignmentId, studentId])
+  @@index([studentId])
+  /// Oversight groups grading activity by the teacher who graded it.
+  @@index([gradedById])
+  /// "What is still waiting to be marked?" — the teacher dashboard's to-do list.
+  @@index([marksObtained])
+  @@map("assignment_submissions")
+}
+
+// ---------------------------------------------------------------------------
+// Notices
+// ---------------------------------------------------------------------------
+
+model Notice {
+  id       String  @id @default(cuid())
+  title    String
+  body     String
+  fileUrl  String?
+  fileName String?
+
+  targetType NoticeTargetType @default(ALL)
+  /// Set when targetType = SECTION (points at one class+section row).
+  targetClassId String?
+  /// Set when targetType = CLASS (matches every section with this class name).
+  targetClassName String?
+  /// Also set when targetType = CLASS. Without it, "BCA Year 2" would match
+  /// that class in EVERY academic year, so a notice meant for this year's
+  /// cohort would also reach next year's.
+  targetAcademicYear String?
+
+  postedById String
+  createdAt  DateTime @default(now())
+
+  targetClass Class?       @relation(fields: [targetClassId], references: [id], onDelete: Cascade)
+  postedBy    User         @relation("NoticeAuthor", fields: [postedById], references: [id])
+  reads       NoticeRead[]
+
+  @@index([createdAt])
+  /// Section-targeted notices are looked up by the reader's class ids.
+  @@index([targetClassId])
+  /// Class-targeted notices match on name + year together.
+  @@index([targetClassName, targetAcademicYear])
+  @@map("notices")
+}
+
+/// Presence of a row = that user has read that notice.
+model NoticeRead {
+  id       String   @id @default(cuid())
+  noticeId String
+  userId   String
+  readAt   DateTime @default(now())
+
+  notice Notice @relation(fields: [noticeId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([noticeId, userId])
+  /// The unread badge runs `reads: { none: { userId } }` on every page
+  /// navigation, filtering by userId alone — which the composite unique above
+  /// cannot serve. This table grows as notices × users, so it is the single
+  /// most important index in the schema.
+  @@index([userId])
+  @@map("notice_reads")
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/// Simple key/value store for college-wide settings an admin can change at
+/// runtime (e.g. the attendance threshold). Defaults live in src/config.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("app_settings")
+}
